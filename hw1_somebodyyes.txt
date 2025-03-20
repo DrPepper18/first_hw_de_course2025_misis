@@ -1,0 +1,118 @@
+-- 1. Средняя стоимость заказа по категориям товаров --
+select name, avg(sum) from (
+select order_id, orders.created_at, categories.name, sum(products.price*order_items.quantity)
+from order_items 
+inner join products on products.id=order_items.product_id
+inner join orders on orders.id = order_items.order_id
+inner join categories on categories.id = products.category_id
+where orders.created_at >= '2023-03-01' and orders.created_at < '2023-04-01'
+group by order_items.order_id, orders.created_at, categories.name, order_items.quantity)
+group by name;
+
+-- 2. Рейтинг пользователей по сумме оплаченных заказов --
+select 
+  RANK() OVER (ORDER BY SUM(products.price * quantity) DESC) AS rank,
+  users.name,
+  sum(products.price*quantity)
+from order_items
+inner join products on products.id = order_items.product_id
+inner join orders on orders.id = order_items.order_id
+inner join users on users.id=orders.user_id
+where orders.status = 'Оплачен'
+group by users.name
+order by sum DESC 
+limit 3
+
+-- 3. Количество заказов и сумма платежей по месяцам --
+select 
+  TO_CHAR(created_at, 'YYYY-MM') as year_month, 
+  count(*),
+  sum(payments.amount) AS total_payments 
+from orders
+inner join payments on payments.order_id = orders.id
+group by year_month
+order by year_month
+
+-- 4. Рейтинг товаров по количеству продаж --
+select 
+  *, round(total_sold/sum(total_sold) over() * 100, 2) as total_percentage
+from (
+  select 
+    products.name, 
+    sum(quantity) as total_sold
+  from order_items
+  inner join products on products.id = order_items.product_id
+  group by products.name
+  order by total_sold desc
+)
+
+-- 5. Пользователи, которые сделали заказы на сумму выше среднего --
+with payment_users as (select users.name, sum(amount) as total_paid from payments
+inner join orders on orders.id=payments.order_id
+inner join users on users.id=orders.user_id
+where orders.status = 'Оплачен'
+group by users.name
+order by total_paid desc)
+select * from payment_users where total_paid >= (select avg(total_paid) from payment_users)
+
+-- 6. Рейтинг товаров по количеству продаж в каждой категории --
+with ranked_table as (select 
+categories.name as category_name, 
+products.name as product_name, 
+sum(quantity),
+ROW_NUMBER() OVER (
+    PARTITION BY categories.name 
+    ORDER BY SUM(order_items.quantity) DESC
+) AS rank from order_items
+inner join products on products.id=order_items.product_id
+inner join categories on categories.id=products.category_id
+group by products.name, categories.name)
+select category_name, product_name, sum 
+from ranked_table
+WHERE 
+    rank <= 3
+ORDER BY 
+    category_name, rank;
+
+-- 7. Категории товаров с максимальной выручкой в каждом месяце --
+with monthly_revenue as (
+    select 
+        TO_CHAR(orders.created_at, 'YYYY-MM') as month, 
+        categories.name as category_name, 
+        sum(products.price * order_items.quantity) as total_revenue
+    from order_items
+    inner join products on products.id = order_items.product_id
+    inner join categories on categories.id = products.category_id
+    inner join orders on orders.id = order_items.order_id
+    where 
+        orders.created_at >= '2023-01-01' 
+        and orders.created_at < '2023-07-01'
+    group by month, categories.name
+),
+ranked_categories as (
+    select 
+        month, 
+        category_name, 
+        total_revenue,
+        RANK() OVER (PARTITION BY month ORDER BY total_revenue DESC) as rank
+    from 
+        monthly_revenue
+)
+select month, category_name, total_revenue
+from ranked_categories
+where rank = 1
+order by month;
+
+-- 8. Накопительная сумма платежей по месяцам --
+with stats as (select
+  TO_CHAR(payments.payment_date, 'YYYY-MM') as year_month, 
+  sum(payments.amount) as monthly_payments
+from payments
+where payments.payment_date >= '2023-01-01'
+group by year_month
+order by year_month)
+select *, sum(monthly_payments) OVER (
+        order by year_month
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) as cumulative_payments
+from stats
